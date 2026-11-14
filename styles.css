@@ -244,7 +244,7 @@ body.tv #tvroot{display:grid;height:100vh;grid-template-rows:auto auto 1fr auto;
 .tvst td.nm{font-weight:800;overflow:hidden;text-overflow:ellipsis}
 .tvst td.av{width:4.2em}
 .tvst td.av{font-family:var(--display);text-align:right;font-size:1.6em}
-.tvst td.cu{text-align:right;color:var(--muted);font-size:1em;width:3.5em}
+.tvst td.cu{text-align:right;color:var(--muted);font-size:1em;width:5em}
 .tvst tr.unq td{color:var(--muted)}
 .tvst tr.cut td{border-bottom:.35vh solid var(--accent)}
 .tvst tr.danger td.nm{color:var(--bad)}

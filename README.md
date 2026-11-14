@@ -53,7 +53,7 @@ Answer the prompts with the defaults.
 3. **Setup** → **Load 15 sample players**, then **Simulate 8 rounds**.
 4. On a laptop, open `your-site.vercel.app/?mode=test#tv`. Click **Full screen**.
 5. On your phone, start a round and enter a few places. The TV should update within a couple of seconds and play the start lights.
-6. Try the finals: **Finals** → **Seed top 6**, then **Setup** → **Auto-fill finals cup**, then **Cut 2 and start cup 2**, and so on to the podium (6 → 4 → 2).
+6. Try the finals: **Finals** → **Seed top 6**, then **Setup** → **Auto-fill finals cup**, then **Cut 2 and start cup 2**, and so on to the podium (6 race one elimination cup, then the final 4 race 2 cups).
 7. When done: **Setup** → **Erase everything** (this only clears test data).
 
 ## Event day

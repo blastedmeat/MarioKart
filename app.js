@@ -155,15 +155,33 @@ function stageRank(stage){
   const sc=heatScore(stage,p=>finPts(p));const seeds=S.finals.seeds;
   return stage.players.slice().sort((a,b)=>(sc[b].pts-sc[a].pts)||(seeds.indexOf(a)-seeds.indexOf(b))).map(p=>({id:p,pts:sc[p].pts}));
 }
-const nextSize=n=>n>2?n-2:0;
+/* Format: elimination cups (bottom 2 out) until 4 remain, then a 2-cup final
+   where the 4 finalists' points from both cups are added together. */
+const FINAL_N=4, FINAL_CUPS=2;
 const FS=()=>S.settings.finalsSize||6;
-function plannedSizes(n){const out=[];while(n){out.push(n);n=nextSize(n)}return out}
-function finalsSizes(){return plannedSizes(S.finals?S.finals.seeds.length:0)}
-function finalOrder(){const st=S.finals.stages;const out=stageRank(st[st.length-1]);const seen=new Set(out.map(x=>x.id));
-  for(let i=st.length-2;i>=0;i--)stageRank(st[i]).forEach(x=>{if(!seen.has(x.id)){seen.add(x.id);out.push(x)}});return out}
+function plan(n){const out=[];while(n>FINAL_N){out.push({size:n,kind:"elim"});n-=2}
+  for(let i=0;i<FINAL_CUPS;i++)out.push({size:n,kind:"final",fi:i});return out}
+const curPlan=()=>plan(S.finals?S.finals.seeds.length:FS());
+function stepName(p){return p.kind==="elim"?"Elimination cup":`Final · cup ${p.fi+1} of ${FINAL_CUPS}`}
+function stepShort(p){return p.kind==="elim"?"bottom 2 out":p.fi===FINAL_CUPS-1?"total wins":"points carry"}
+function formatText(n){const pl=plan(n);const e=pl.filter(x=>x.kind==="elim").length;const f=pl[pl.length-1].size;
+  return(e?`${e===1?"1 elimination cup":e+" elimination cups"} (bottom 2 out), then `:"")+`the final ${f} race ${FINAL_CUPS} cups, total points wins`}
+function combinedRank(upto){
+  const st=S.finals.stages;const pl=curPlan();const seeds=S.finals.seeds;const idx=[];
+  for(let j=0;j<=upto&&j<st.length;j++)if(pl[j]&&pl[j].kind==="final")idx.push(j);
+  if(!idx.length)return[];
+  const tot={};st[idx[0]].players.forEach(p=>tot[p]={id:p,pts:0,cups:[]});
+  idx.forEach(j=>{const sc=heatScore(st[j],q=>finPts(q));Object.keys(tot).forEach(p=>{const v=sc[p]?sc[p].pts:0;tot[p].pts+=v;tot[p].cups.push(v)})});
+  return Object.values(tot).map(x=>({...x,pts:Math.round(x.pts*10)/10})).sort((a,b)=>(b.pts-a.pts)||(seeds.indexOf(a.id)-seeds.indexOf(b.id)));
+}
+function nextPlayers(i){const pl=curPlan();const p=pl[i],st=S.finals.stages[i];if(!p||!st||i>=pl.length-1)return null;
+  if(p.kind==="elim")return stageRank(st).slice(0,p.size-2).map(x=>x.id);
+  return st.players.slice()}
+function finalOrder(){const st=S.finals.stages;const out=combinedRank(st.length-1);const seen=new Set(out.map(x=>x.id));
+  for(let i=st.length-1;i>=0;i--)stageRank(st[i]).forEach(x=>{if(!seen.has(x.id)){seen.add(x.id);out.push(x)}});return out}
 function champion(){
   if(!S.finals)return null;const st=S.finals.stages;const cur=st[st.length-1];
-  if(!cur||!cur.done||nextSize(cur.players.length))return null;return finalOrder();
+  if(!cur||!cur.done||st.length<curPlan().length)return null;return finalOrder();
 }
 
 /* ---------------- test helpers ---------------- */
@@ -223,7 +241,7 @@ function react(){
   const now=sig();
   if(lastSig&&isTV()){
     if(now.r>lastSig.r)startLights(`Round ${now.r}`);
-    else if(now.f>lastSig.f)startLights(now.f===1?"Finals":`Cup ${now.f}`);
+    else if(now.f>lastSig.f)startLights(now.f===1?"Finals":stepName(curPlan()[now.f-1]||{kind:"final",fi:0}));
     if(now.c&&now.c!==lastSig.c)setTimeout(confetti,300);
   }
   lastSig=now;
@@ -250,8 +268,8 @@ function act(a,el){
   case"finals":{if(qualifiers().length<2){ui.msg="Need at least 2 qualified players.";render();break}
     commit(()=>{if(S.finals)return;const seeds=qualifiers().slice(0,FS()).map(s=>s.id);S.finals={seeds,stages:[{tv:-1,cup:pickCup(seeds,[],stats()),players:seeds,res:{},done:false}]}});startLights("Finals");break}
   case"advance":{const len=S.finals.stages.length;commit(()=>{const st=S.finals.stages;if(st.length!==len)return;const last=st[st.length-1];if(!last.done)return;
-      const keep=stageRank(last).slice(0,nextSize(last.players.length)).map(x=>x.id);if(!keep.length)return;
-      st.push({tv:-1,cup:pickCup(keep,st.map(s=>s.cup),stats()),players:keep,res:{},done:false})});startLights(`Cup ${len+1}`);break}
+      const keep=nextPlayers(st.length-1);if(!keep||!keep.length)return;
+      st.push({tv:-1,cup:pickCup(keep,st.map(s=>s.cup),stats()),players:keep,res:{},done:false})});startLights(stepName(curPlan()[len]||{kind:"final",fi:0}));break}
   case"undofinal":commit(()=>{if(!S.finals)return;const st=S.finals.stages;if(st.length>1)st.pop();else S.finals=null});break;
   case"savesettings":{
     const nums=v=>v.split(/[^0-9.]+/).map(Number).filter(x=>x>0);
@@ -365,29 +383,34 @@ function viewStandings(){
    </tbody></table></div></div>`;
 }
 
+function ladderHTML(pl,ci){return`<div class="ladder">${pl.map((p,i)=>`<div class="step ${i===ci?"now":ci>=0&&i<ci?"past":""}"><span class="label">${p.kind==="elim"?"Elimination":"Final "+(p.fi+1)}</span><b>${p.size}</b><span class="small muted">${stepShort(p)}</span></div>`).join("")}</div>`}
 function viewFinals(){
   const F=S.finals;
   if(!F){const q=qualifiers();
-    return`<div class="panel"><div><div class="label">Finals</div><h2>Elimination cups</h2></div>
-    ${(()=>{const z=plannedSizes(FS());return`<div class="ladder">${z.map((n,i)=>`<div class="step"><span class="label">Cup ${i+1}</span><b>${n}</b><span class="small muted">${i===z.length-1?"winner":"cut 2"}</span></div>`).join("")}</div>`})()}
-    <p class="small muted" style="margin:0">Linked play allows 2 players per Switch, so ${FS()} racers need ${Math.ceil(FS()/2)} Switches. Points reset each cup (${S.settings.finalPoints.join("/")}). Ties go to the higher qualifying seed. ${q.length} qualified so far.</p>
+    return`<div class="panel"><div><div class="label">Finals</div><h2>Top ${FS()} finals</h2></div>
+    ${ladderHTML(plan(FS()),-1)}
+    <p class="small muted" style="margin:0">Format: ${formatText(FS())}. Linked play allows 2 players per Switch, so ${FS()} racers need ${Math.ceil(FS()/2)} Switches. Points per race: ${S.settings.finalPoints.slice(0,FS()).join("/")}. Ties go to the higher qualifying seed. ${q.length} qualified so far.</p>
     ${canWrite?`<div class="row"><button class="btn primary" data-act="finals" ${q.length>=2?"":"disabled"}>Seed top ${Math.min(FS(),q.length)} and start finals</button></div>`:""}
     ${ui.msg?`<div class="note warn">${esc(ui.msg)}</div>`:""}</div>`}
-  const st=F.stages;const cur=st[st.length-1];const ci=st.length-1;const sizes=finalsSizes();
-  const ladder=`<div class="ladder">${sizes.map((s,i)=>`<div class="step ${i===ci?"now":i<ci?"past":""}"><span class="label">Cup ${i+1}</span><b>${s}</b><span class="small muted">${i===sizes.length-1?"winner":"cut "+(s-sizes[i+1])}</span></div>`).join("")}</div>`;
+  const st=F.stages;const cur=st[st.length-1];const ci=st.length-1;const pl=curPlan();const step=pl[ci]||pl[pl.length-1];
+  const ladder=ladderHTML(pl,ci);
   let after="";
-  if(cur.done){let rk=stageRank(cur);const keep=nextSize(cur.players.length);
-    if(!keep){rk=finalOrder();const step=(x,i)=>x?`<div class="s${i+1}"><b>${esc(pname(x.id))}</b><small>${x.pts} pts</small><span class="num">${i+1}</span></div>`:"<div></div>";
+  if(step.kind==="final"){const cr=combinedRank(ci);
+    after+=`<div class="panel"><div><div class="label">Final standings</div><h3>Both cups combined</h3></div><div class="gridwrap"><table class="stand"><thead><tr><th>#</th><th>Racer</th>${Array.from({length:FINAL_CUPS},(_,i)=>`<th>Cup ${i+1}</th>`).join("")}<th>Total</th></tr></thead><tbody>
+      ${cr.map((x,i)=>`<tr><td class="rk ${i<3?"r"+(i+1):""}">${i+1}</td><td class="nm">${esc(pname(x.id))}</td>${Array.from({length:FINAL_CUPS},(_,j)=>`<td>${x.cups[j]??"–"}</td>`).join("")}<td class="avg">${x.pts}</td></tr>`).join("")}</tbody></table></div><span class="small muted">Ties go to the higher qualifying seed.</span></div>`}
+  if(cur.done){let rk=stageRank(cur);const done=ci>=pl.length-1;
+    if(done){rk=finalOrder();const step=(x,i)=>x?`<div class="s${i+1}"><b>${esc(pname(x.id))}</b><small>${x.pts} pts</small><span class="num">${i+1}</span></div>`:"<div></div>";
       after=`<div class="podiumwrap"><span class="label">Champion</span><div class="champname">${esc(pname(rk[0].id))}</div>
       <div class="podium">${step(rk[1],1)}${step(rk[0],0)}${step(rk[2],2)}</div>
       <div class="podiumrest">${rk.slice(3).map((x,i)=>`${ORD(i+4)} ${esc(pname(x.id))} (${x.pts})`).join(" · ")}</div></div>`;
       const key=F.seeds.join()+ci;if(ui.confettiFor!==key){ui.confettiFor=key;setTimeout(confetti,50)}}
-    else after=`<div class="panel"><h3>Cup ${ci+1} result</h3><div class="small" style="display:grid;gap:4px">${rk.map((x,i)=>`<div class="${i<keep?"adv":"out"}"><span class="placebadge ${i<3?"b"+(i+1):""}">${ORD(i+1)}</span>${esc(pname(x.id))} · ${x.pts} pts ${i<keep?"→ advances":"· eliminated"}</div>`).join("")}</div>
-      ${canWrite?`<div class="row"><button class="btn primary" data-act="advance">Cut ${cur.players.length-keep} and start cup ${ci+2}</button></div>`:""}</div>`}
+    else if(step.kind==="elim"){const keep=step.size-2;after=`<div class="panel"><h3>Elimination result</h3><div class="small" style="display:grid;gap:4px">${rk.map((x,i)=>`<div class="${i<keep?"adv":"out"}"><span class="placebadge ${i<3?"b"+(i+1):""}">${ORD(i+1)}</span>${esc(pname(x.id))} · ${x.pts} pts ${i<keep?"→ advances":"· eliminated"}</div>`).join("")}</div>
+      ${canWrite?`<div class="row"><button class="btn primary" data-act="advance">Cut ${cur.players.length-keep} and start ${pl[ci+1].kind==="final"?"the final":"the next cup"}</button></div>`:""}</div>`}
+    else after+=canWrite?`<div class="row"><button class="btn primary" data-act="advance">Start final cup ${step.fi+2}</button></div>`:""}
   const seeds=`<details><summary>Seeds</summary><div class="inner small">${F.seeds.map((s,i)=>`${i+1}. ${esc(pname(s))}`).join("<br>")}</div></details>`;
-  const prev=st.slice(0,-1).map((h,i)=>`<details><summary>Cup ${i+1} · ${esc(h.cup)}</summary><div class="inner">${heatCard(h,`f:${i}`,{final:true,label:"Final",color:"var(--final)"})}</div></details>`).join("");
-  return`<div class="panel"><div class="row between"><div><div class="label">Finals</div><h2>Cup ${ci+1} of ${sizes.length}</h2></div>${canWrite?`<button class="btn ghost" data-act="undofinal">${st.length>1?"Undo last cut":"Cancel finals"}</button>`:""}</div>${ladder}</div>
-   ${heatCard(cur,`f:${ci}`,{final:true,label:`Cup ${ci+1}`,color:"var(--final)"})}${after}${prev}${seeds}`;
+  const prev=st.slice(0,-1).map((h,i)=>`<details><summary>${stepName(pl[i])} · ${esc(h.cup)}</summary><div class="inner">${heatCard(h,`f:${i}`,{final:true,label:pl[i].kind==="elim"?"Elim":"Final",color:"var(--final)"})}</div></details>`).join("");
+  return`<div class="panel"><div class="row between"><div><div class="label">Finals</div><h2>${stepName(step)}</h2></div>${canWrite?`<button class="btn ghost" data-act="undofinal">${st.length>1?"Undo last step":"Cancel finals"}</button>`:""}</div>${ladder}</div>
+   ${heatCard(cur,`f:${ci}`,{final:true,label:step.kind==="elim"?"Elim":"Final",color:"var(--final)"})}${after}${prev}${seeds}`;
 }
 
 function viewSetup(){
@@ -409,7 +432,7 @@ function viewSetup(){
    <label>Qualifying points, 1st→4th<input type="text" id="s-pts" value="${s.points.join(", ")}"></label>
    <label>Finals points, 1st→8th<input type="text" id="s-fpts" value="${s.finalPoints.join(", ")}"></label>
    <label>Cup pool<select id="s-pool"><option value="all" ${s.cupPool==="all"?"selected":""}>All 24 cups (with Booster Course)</option><option value="base" ${s.cupPool==="base"?"selected":""}>Base game 12 cups</option></select></label>
-   <label>Finals size<select id="s-fs">${[4,6,8].map(n=>`<option value="${n}" ${n===FS()?"selected":""}>${n} racers (${plannedSizes(n).join(" → ")})</option>`).join("")}</select></label>
+   <label>Finals size<select id="s-fs">${[4,6,8].map(n=>`<option value="${n}" ${n===FS()?"selected":""}>${n} racers</option>`).join("")}</select></label>
   </div>
   <div class="row"><button class="btn primary" data-act="savesettings">Save settings</button>${ui.msg?`<span class="small">${esc(ui.msg)}</span>`:""}</div>
   <p class="small muted" style="margin:0">Point changes recalculate every past result.</p></div>
@@ -445,7 +468,7 @@ function tvStandings(limit){
 function viewTV(){
   const r=curRound();const F=S.finals;const champ=champion();
   let stage="Starting soon";
-  if(F)stage=champ?"Champion":`Finals · Cup ${F.stages.length} of ${finalsSizes().length}`;
+  if(F)stage=champ?"Champion":(curPlan()[F.stages.length-1].kind==="elim"?"Finals · ":"Final · ")+(()=>{const p=curPlan()[F.stages.length-1];return p.kind==="elim"?"Elimination":`Cup ${p.fi+1} of ${FINAL_CUPS}`})();
   else if(r)stage=`Round ${S.rounds.length}`+(roundDone(r)?" · complete":"");
   const bar=`<div class="tvflag"></div><div class="tvbar"><div class="tvtitle">Kart <span>Race</span> Control</div><div class="tvstage">${stage}</div>${SLOT==="test"?`<div class="tvtest">TEST MODE</div>`:""}<div class="tvclock" id="tvclock">${clock()}</div></div>`;
   const url=esc(location.host||"");
@@ -455,13 +478,18 @@ function viewTV(){
     main=`<div class="tvchamp"><div class="lbl">Tournament champion</div><div class="who">${esc(pname(rk[0].id))}</div><div class="tvpod">${step(rk[1],1)}${step(rk[0],0)}${step(rk[2],2)}</div></div>`;
     foot=`<div class="tvfoot"><span class="sit">${rk.slice(3).map((x,i)=>`${ORD(i+4)} <b>${esc(pname(x.id))}</b>`).join(" · ")}</span></div>`;
   }else if(F){
-    const st=F.stages;const cur=st[st.length-1];const sizes=finalsSizes();const ci=st.length-1;const keep=nextSize(cur.players.length);
-    const rk=stageRank(cur);const touched=touchedHeat(cur);
-    const ladder=`<div class="tvladder">${sizes.map((s,i)=>`<div class="${i===ci?"now":i<ci?"past":""}"><b>${s}</b><span>Cup ${i+1} · ${i===sizes.length-1?"winner takes it":"bottom "+(s-sizes[i+1])+" out"}</span></div>`).join("")}</div>`;
-    const side=`<aside class="tvside"><h3>Cup ${ci+1} <small>${keep?`top ${keep} advance`:"winner takes the title"}</small></h3><table class="tvst"><tbody>
-      ${rk.map((x,i)=>`<tr class="${keep&&i===keep-1?"cut":""} ${keep&&i>=keep&&touched?"danger":""}"><td class="rk ${i<3?"r"+(i+1):""}">${i+1}</td><td class="nm">${esc(pname(x.id))}</td><td class="av">${x.pts}</td><td class="cu">#${F.seeds.indexOf(x.id)+1} seed</td></tr>`).join("")}</tbody></table>
+    const st=F.stages;const cur=st[st.length-1];const pl=curPlan();const ci=st.length-1;const step=pl[ci];
+    const keep=step.kind==="elim"?step.size-2:0;const touched=touchedHeat(cur);
+    const rk=step.kind==="elim"?stageRank(cur):combinedRank(ci);
+    const ladder=`<div class="tvladder">${pl.map((p,i)=>`<div class="${i===ci?"now":i<ci?"past":""}"><b>${p.size}</b><span>${p.kind==="elim"?"Elimination":"Final "+(p.fi+1)} · ${stepShort(p)}</span></div>`).join("")}</div>`;
+    const side=step.kind==="elim"
+      ?`<aside class="tvside"><h3>Elimination <small>top ${keep} make the final</small></h3><table class="tvst"><tbody>
+      ${rk.map((x,i)=>`<tr class="${i===keep-1?"cut":""} ${i>=keep&&touched?"danger":""}"><td class="rk ${i<3?"r"+(i+1):""}">${i+1}</td><td class="nm">${esc(pname(x.id))}</td><td class="av">${x.pts}</td><td class="cu">#${F.seeds.indexOf(x.id)+1} seed</td></tr>`).join("")}</tbody></table>
+      <div class="tvmore">Ties go to the higher seed.</div></aside>`
+      :`<aside class="tvside"><h3>Final standings <small>${FINAL_CUPS} cups combined · total wins</small></h3><table class="tvst"><tbody>
+      ${rk.map((x,i)=>`<tr><td class="rk ${i<3?"r"+(i+1):""}">${i+1}</td><td class="nm">${esc(pname(x.id))}</td><td class="av">${x.pts}</td><td class="cu">${x.cups.join(" + ")}</td></tr>`).join("")}</tbody></table>
       <div class="tvmore">Ties go to the higher seed.</div></aside>`;
-    main=`<div class="tvmain"><div class="tvfinal">${ladder}<div class="tvheats" style="grid-template-columns:1fr">${tvHeat(cur,`Finals`,`Cup ${ci+1}`,"var(--final)",true)}</div></div>${side}</div>`;
+    main=`<div class="tvmain"><div class="tvfinal">${ladder}<div class="tvheats" style="grid-template-columns:1fr">${tvHeat(cur,step.kind==="elim"?"Elimination":"Final",step.kind==="elim"?"":`Cup ${step.fi+1} of ${FINAL_CUPS}`,"var(--final)",true)}</div></div>${side}</div>`;
     foot=`<div class="tvfoot"><span class="sit">${cur.done&&keep?`Out: <b>${rk.slice(keep).map(x=>esc(pname(x.id))).join(", ")}</b>`:`${cur.players.length} racers · points ${S.settings.finalPoints.slice(0,cur.players.length).join("/")}`}</span><span class="url">${url}</span></div>`;
   }else if(r){
     main=`<div class="tvmain"><div class="tvheats" style="grid-template-columns:repeat(${r.heats.length},1fr)">${r.heats.map(h=>tvHeat(h,`TV ${h.tv+1}`,TVN[h.tv%4],TVC[h.tv%4],false)).join("")}</div>${tvStandings(12)}</div>`;
@@ -471,7 +499,7 @@ function viewTV(){
     const here=S.players.filter(p=>p.present);const s=S.settings;
     main=`<div class="tvwait"><div class="tvbig"><h2>Checked in: ${here.length}</h2>
       ${here.length?`<div class="tvchips">${here.map(p=>`<span>${esc(p.name)}</span>`).join("")}</div>`:`<p>Players appear here as they arrive.</p>`}
-      <div class="tvrules"><div><b>4 races per cup</b><span>One cup per TV each round, up to ${s.tvs*4} racing at once</span></div><div><b>${s.points.join(" / ")}</b><span>Points for 1st to 4th. Ranked by average per race.</span></div><div><b>Top ${FS()} → Finals</b><span>Elimination cups: ${plannedSizes(FS()).join(", then ")}</span></div></div></div>${tvStandings(12)}</div>`;
+      <div class="tvrules"><div><b>4 races per cup</b><span>One cup per TV each round, up to ${s.tvs*4} racing at once</span></div><div><b>${s.points.join(" / ")}</b><span>Points for 1st to 4th. Ranked by average per race.</span></div><div><b>Top ${FS()} → Finals</b><span>${formatText(FS()).replace(/^./,c=>c.toUpperCase())}</span></div></div></div>${tvStandings(12)}</div>`;
     foot=`<div class="tvfoot"><span class="sit">Follow standings on your phone</span><span class="url">${url}</span></div>`;
   }
   return bar+main+foot;
