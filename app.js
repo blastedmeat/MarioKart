@@ -56,7 +56,11 @@ const clone=o=>JSON.parse(JSON.stringify(o));
 
 let S=defaultState(), ver=0, loaded=false;
 let pin=LS.get("krc-pin")||"";
-let canWrite=!ONLINE;
+let canWrite=!ONLINE;   // organizer: everything
+let canEnter=!ONLINE;   // results entry (organizer or racer code)
+let role=ONLINE?null:"admin";
+function setRole(r){role=r;canWrite=r==="admin";canEnter=r==="admin"||r==="racer"}
+const roleLabel=()=>(SLOT==="test"?"Test":"Live")+(role==="admin"?" · editing":role==="racer"?" · results entry":" · view only");
 let tab=LS.get("krc-tab")||"race";
 const ui={msg:"",confirm:null,errs:{},hist:null,pinMsg:"",confettiFor:null};
 
@@ -203,8 +207,8 @@ async function fetchRow(){
   const {data,error}=await sb.from("tournaments").select("body,version").eq("id",SLOT).maybeSingle();
   if(error)throw error;return data||{body:{},version:0};
 }
-function commit(fn){
-  if(!canWrite)return;
+function commit(fn,resultsOnly){
+  if(!(canWrite||(resultsOnly&&canEnter)))return;
   fn();render();
   if(!ONLINE){localSave();setSync("ok","Saved in this browser");return}
   pending.push(fn);flush();
@@ -220,12 +224,14 @@ async function flush(){
       try{const row=await fetchRow();ver=Number(row.version);S=normalize(row.body);pending.forEach(f=>f());render();continue}
       catch(e){setSync("err","Not saved, retrying…");break}
     }
-    if(msg.includes("bad_pin")){pending=[];canWrite=false;pin="";LS.del("krc-pin");ui.pinMsg="That PIN was rejected. Enter it again.";
+    if(msg.includes("not_allowed")){pending=[];ui.msg="Only the organizer can do that. Your change was undone.";
+      try{const row=await fetchRow();ver=Number(row.version);S=normalize(row.body)}catch(e){}flushing=false;setSync("ok",roleLabel());render();return}
+    if(msg.includes("bad_pin")){pending=[];setRole(null);pin="";LS.del("krc-pin");ui.pinMsg="That code was rejected. Enter it again.";
       try{const row=await fetchRow();ver=Number(row.version);S=normalize(row.body)}catch(e){}flushing=false;setSync("err","Locked");render();return}
     setSync("err","Not saved, retrying…");break;
   }
   flushing=false;
-  if(pending.length)retryTimer=setTimeout(flush,4000);else setSync("ok",SLOT==="test"?"Test · saved":"Live · saved");
+  if(pending.length)retryTimer=setTimeout(flush,4000);else setSync("ok",roleLabel()+" · saved");
 }
 function applyRemote(row){
   if(!row||pending.length||flushing)return;
@@ -263,8 +269,8 @@ function act(a,el){
   case"undo":commit(()=>{if(!roundTouched(curRound()))S.rounds.pop()});break;
   case"swapcup":{const k=d.k;commit(()=>{const h=getHeat(k);if(!h||touchedHeat(h))return;const others=k.startsWith("f")?S.finals.stages.map(s=>s.cup):curRound().heats.map(x=>x.cup);h.cup=pickCup(h.players,others,stats())});break}
   case"done":{const h=getHeat(d.k);const err=validateHeat(h);if(err){ui.errs[d.k]=err;render();break}
-    delete ui.errs[d.k];const k=d.k;commit(()=>{const x=getHeat(k);if(x)x.done=true});break}
-  case"reopen":{const k=d.k;commit(()=>{const x=getHeat(k);if(x)x.done=false});break}
+    delete ui.errs[d.k];const k=d.k;commit(()=>{const x=getHeat(k);if(x)x.done=true},true);break}
+  case"reopen":{const k=d.k;commit(()=>{const x=getHeat(k);if(x)x.done=false},true);break}
   case"finals":{if(qualifiers().length<2){ui.msg="Need at least 2 qualified players.";render();break}
     commit(()=>{if(S.finals)return;const seeds=qualifiers().slice(0,FS()).map(s=>s.id);S.finals={seeds,stages:[{tv:-1,cup:pickCup(seeds,[],stats()),players:seeds,res:{},done:false}]}});startLights("Finals");break}
   case"advance":{const len=S.finals.stages.length;commit(()=>{const st=S.finals.stages;if(st.length!==len)return;const last=st[st.length-1];if(!last.done)return;
@@ -287,7 +293,7 @@ function act(a,el){
   case"simquals":commit(()=>{for(let i=0;i<8;i++){const r=curRound();if(r&&!roundDone(r))r.heats.forEach(h=>{if(!h.done)fillHeat(h)});const n=buildRound();if(!n)break;n.heats.forEach(fillHeat);S.rounds.push(n)}});break;
   case"fillfinal":commit(()=>{if(!S.finals)return;const st=S.finals.stages;const c=st[st.length-1];if(!c.done)fillHeat(c)});break;
   case"unlock":unlock();break;
-  case"lock":pin="";LS.del("krc-pin");canWrite=false;setSync("ok","View only");render();break;
+  case"lock":pin="";LS.del("krc-pin");setRole(null);ui.pinMsg="";setSync("ok",roleLabel());render();break;
   case"loadhist":loadHistory();break;
   case"restore":{const item=(ui.hist||[])[+d.i];if(!item)break;ui.confirm=null;ui.msg="Restored the save from "+new Date(item.saved_at).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"})+".";
     const body=clone(item.body);commit(()=>{S=normalize(body)});ui.hist=null;break}
@@ -296,14 +302,20 @@ function act(a,el){
 }
 function getHeat(k){const [t,a,b]=k.split(":");return t==="f"?S.finals&&S.finals.stages[+a]:S.rounds[+a]&&S.rounds[+a].heats[+b]}
 
+async function getRole(code){
+  const a=await sb.rpc("check_role",{p_pin:code});
+  if(!a.error)return a.data==="admin"||a.data==="racer"?a.data:null;
+  const b=await sb.rpc("check_pin",{p_pin:code});   // database not upgraded yet
+  if(b.error)throw b.error;return b.data===true?"admin":null;
+}
+const unlockBox=(title,hint)=>`<div class="panel"><div><div class="label">Enter results</div><h3>${title}</h3></div><div class="pinrow"><input type="text" id="pin" autocomplete="off" autocapitalize="none" placeholder="Racer code or organizer PIN"><button class="btn primary" data-act="unlock">Unlock</button></div>${ui.pinMsg?`<span class="small">${esc(ui.pinMsg)}</span>`:`<span class="small muted">${hint}</span>`}</div>`;
 async function unlock(){
-  const v=(document.getElementById("pin")||{}).value||"";if(!v){ui.pinMsg="Enter the PIN.";render();return}
+  const v=((document.getElementById("pin")||{}).value||"").trim();if(!v){ui.pinMsg="Enter the code.";render();return}
   ui.pinMsg="Checking…";render();
-  const {data,error}=await sb.rpc("check_pin",{p_pin:v});
-  if(error){ui.pinMsg="Couldn't reach the database. Check the connection and try again.";render();return}
-  if(data===true){pin=v;LS.set("krc-pin",v);canWrite=true;ui.pinMsg="";setSync("ok",SLOT==="test"?"Test · editing":"Live · editing");
+  let r;try{r=await getRole(v)}catch(e){ui.pinMsg="Couldn't reach the database. Check the connection and try again.";render();return}
+  if(r){pin=v;LS.set("krc-pin",v);setRole(r);ui.pinMsg="";setSync("ok",roleLabel());
     try{const row=await fetchRow();ver=Number(row.version);S=normalize(row.body)}catch(e){}}
-  else ui.pinMsg="That PIN doesn't match.";
+  else ui.pinMsg="That code doesn't match.";
   render();
 }
 async function loadHistory(){
@@ -318,7 +330,7 @@ function summarize(b){b=normalize(b);const done=b.rounds.reduce((a,r)=>a+r.heats
 /* ---------------- phone / laptop views ---------------- */
 function heatCard(h,k,{final=false,label,color}={}){
   const fn=final?(p=>finPts(p)):qualPts;const sc=heatScore(h,fn);const touched=touchedHeat(h);
-  const n=h.players.length;const ro=!canWrite||h.done;
+  const n=h.players.length;const ro=!canEnter||h.done;
   const opts=v=>`<option value="">–</option>`+Array.from({length:n},(_,i)=>`<option value="${i+1}"${v===i+1?" selected":""}>${ORD(i+1)}</option>`).join("");
   const rows=h.players.map(p=>`<tr><td class="name">${esc(pname(p))}</td>${Array.from({length:RACES},(_,r)=>{const v=h.res?.[p]?.[r];
     return`<td><select aria-label="${esc(pname(p))} race ${r+1}" data-k="${k}" data-p="${p}" data-r="${r}" class="${v>=1&&v<=3?"pos"+v:""}" ${ro?"disabled":""}>${opts(v)}</select></td>`}).join("")}<td class="pts">${sc[p].pts}</td></tr>`).join("");
@@ -328,8 +340,8 @@ function heatCard(h,k,{final=false,label,color}={}){
   <span class="status ${h.done?"done":"live"}">${h.done?"Finished":touched?"Racing":"Up next"}</span></div>
   <div class="rumble"></div>
   <div class="gridwrap"><table class="grid"><thead><tr><th>Racer</th>${Array.from({length:RACES},(_,r)=>`<th><span class="lap">R${r+1}</span></th>`).join("")}<th>Pts</th></tr></thead><tbody>${rows}</tbody></table></div>
-  ${canWrite?`<div class="heat-foot">${ui.errs[k]?`<span class="err">${esc(ui.errs[k])}</span>`:`<span class="small muted">${h.done?"Locked. Reopen to correct a result.":"Leave a racer blank if they left mid-cup."}</span>`}
-   <div class="row">${!touched&&!h.done?`<button class="btn ghost" data-act="swapcup" data-k="${k}">Swap cup</button>`:""}
+  ${canEnter?`<div class="heat-foot">${ui.errs[k]?`<span class="err">${esc(ui.errs[k])}</span>`:`<span class="small muted">${h.done?"Locked. Reopen to correct a result.":"Leave a racer blank if they left mid-cup."}</span>`}
+   <div class="row">${canWrite&&!touched&&!h.done?`<button class="btn ghost" data-act="swapcup" data-k="${k}">Swap cup</button>`:""}
    ${h.done?`<button class="btn ghost" data-act="reopen" data-k="${k}">Reopen</button>`:`<button class="btn primary" data-act="done" data-k="${k}">Cup finished</button>`}</div></div>`:""}
   </article>`;
 }
@@ -416,8 +428,9 @@ function viewFinals(){
 function viewSetup(){
   const s=S.settings;const testLink=SLOT==="test"?`<a href="${linkFor("live")}">Go to the live event</a>`:`<a href="${linkFor("test")}">Open test mode</a>`;
   const access=!ONLINE?`<div class="panel"><div><div class="label">Editing</div><h3>Demo mode</h3></div><p class="small muted" style="margin:0">No database is configured, so everything saves in this browser only. Fill in config.js to go live.</p></div>`
-   :canWrite?`<div class="panel"><div class="row between"><div><div class="label">Editing</div><h3>Unlocked on this device</h3></div><button class="btn ghost" data-act="lock">Lock</button></div><p class="small muted" style="margin:0">Lock before handing this device to someone else.</p></div>`
-   :`<div class="panel"><div><div class="label">Editing</div><h3>Enter PIN to edit</h3></div><div class="pinrow"><input type="text" id="pin" autocomplete="off" placeholder="Organizer PIN"><button class="btn primary" data-act="unlock">Unlock</button></div>${ui.pinMsg?`<span class="small">${esc(ui.pinMsg)}</span>`:`<span class="small muted">Everyone else sees a read-only view.</span>`}</div>`;
+   :canWrite?`<div class="panel"><div class="row between"><div><div class="label">Editing</div><h3>Organizer · unlocked on this device</h3></div><button class="btn ghost" data-act="lock">Lock</button></div><p class="small muted" style="margin:0">Lock before handing this device to someone else. Racers can enter results with the racer code; everything else needs your PIN.</p></div>`
+   :canEnter?`<div class="panel"><div class="row between"><div><div class="label">Editing</div><h3>Results entry unlocked</h3></div><button class="btn ghost" data-act="lock">Lock</button></div><p class="small muted" style="margin:0">You can enter places and mark cups finished. Organizer? Enter your PIN below.</p></div>`+unlockBox("Organizer PIN","Unlocks check-ins, rounds, finals and settings.")
+   :unlockBox("Unlock editing","Racer code: enter results. Organizer PIN: everything.");
   const test=`<div class="panel"><div><div class="label">Testing</div><h3>${SLOT==="test"?"Test tools":"Try it safely first"}</h3></div>
    ${SLOT==="test"?`<p class="small muted" style="margin:0">Test mode has its own data. Nothing here touches the live event.</p>
    ${canWrite?`<div class="row"><button class="btn" data-act="sample">Load 15 sample players</button><button class="btn" data-act="fillround">Auto-fill current round</button><button class="btn" data-act="simquals">Simulate 8 rounds</button><button class="btn" data-act="fillfinal">Auto-fill finals cup</button></div>`:""}`
@@ -535,7 +548,8 @@ function render(){
   document.querySelectorAll("#tabs button").forEach(b=>b.setAttribute("aria-current",b.dataset.tab===tab));
   const v={race:viewRace,players:viewPlayers,standings:viewStandings,finals:viewFinals,setup:viewSetup}[tab]||viewRace;
   const a=document.activeElement;const keepId=a&&(a.id==="newname"||a.id==="pin")?a.id:null;const keepVal=keepId?a.value:null;
-  const lockNote=ONLINE&&!canWrite&&tab!=="setup"?`<div class="note">Live view. Results update as they're entered. Organizer? Unlock editing on the Setup tab.</div>`:"";
+  const lockNote=!ONLINE||tab==="setup"?"":!canEnter?(tab==="race"&&curRound()?unlockBox("Enter your TV's results","Ask the organizer for the racer code. Everyone else can just watch."):`<div class="note">Live view. Results update as they're entered. Have the racer code? Unlock on the Race or Setup tab.</div>`)
+    :!canWrite&&tab!=="race"?`<div class="note">Results entry only. Places and "Cup finished" are on the Race and Finals tabs.</div>`:"";
   document.getElementById("app").innerHTML=lockNote+v();
   if(keepId){const i=document.getElementById(keepId);if(i){i.value=keepVal;i.focus()}}
 }
@@ -545,7 +559,7 @@ document.getElementById("tabs").addEventListener("click",e=>{const b=e.target.cl
 document.getElementById("app").addEventListener("click",e=>{const b=e.target.closest("[data-act]");if(b&&!b.disabled)act(b.dataset.act,b)});
 document.getElementById("app").addEventListener("change",e=>{const s=e.target;if(s.tagName!=="SELECT"||!s.dataset.k)return;
   const k=s.dataset.k,p=s.dataset.p,r=+s.dataset.r,val=s.value?+s.value:null;delete ui.errs[k];
-  commit(()=>{const h=getHeat(k);if(!h)return;h.res=h.res||{};const arr=(h.res[p]||[null,null,null,null]).slice();arr[r]=val;h.res[p]=arr})});
+  commit(()=>{const h=getHeat(k);if(!h)return;h.res=h.res||{};const arr=(h.res[p]||[null,null,null,null]).slice();arr[r]=val;h.res[p]=arr},true)});
 document.getElementById("app").addEventListener("keydown",e=>{if(e.key!=="Enter")return;if(e.target.id==="newname"){e.preventDefault();act("add",e.target)}if(e.target.id==="pin"){e.preventDefault();unlock()}});
 window.addEventListener("hashchange",render);
 window.addEventListener("storage",e=>{if(!ONLINE&&e.key===localKey()){const row=localLoad();applyRemote(row)}});
@@ -564,8 +578,8 @@ render();
   if(!ONLINE){const row=localLoad();ver=row.version;S=normalize(row.body);loaded=true;react();setSync("ok","Demo · this browser only");render();return}
   setSync("busy","Connecting…");
   try{const row=await fetchRow();applyRemote(row);react()}catch(e){setSync("err","Can't reach the database");}
-  if(pin){const {data}=await sb.rpc("check_pin",{p_pin:pin});canWrite=data===true;if(!canWrite){pin="";LS.del("krc-pin")}}
-  setSync("ok",(SLOT==="test"?"Test":"Live")+(canWrite?" · editing":" · view only"));render();
+  if(pin){try{setRole(await getRole(pin))}catch(e){}if(!role){pin="";LS.del("krc-pin")}}
+  setSync("ok",roleLabel());render();
   sb.channel("krc-"+SLOT).on("postgres_changes",{event:"*",schema:"public",table:"tournaments",filter:"id=eq."+SLOT},p=>{if(p.new&&p.new.body)applyRemote(p.new)}).subscribe();
   setInterval(async()=>{if(document.hidden)return;try{applyRemote(await fetchRow())}catch(e){}},isTV()?8000:20000);
 })();

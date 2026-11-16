@@ -61,6 +61,13 @@ Answer the prompts with the defaults.
 - Your phone: open `your-site.vercel.app`, **Setup** → PIN → **Unlock**. A second helper can unlock on their phone too; simultaneous edits are merged.
 - Players can open `your-site.vercel.app` on their own phones to follow along (read-only).
 
+## Racer code (results entry for everyone)
+Run `supabase/racer-code.sql` once (after `setup.sql`), with your racer code on the marked line.
+Anyone who types the racer code on the Race tab can enter places and mark cups finished or reopen them.
+Check-ins, starting rounds, finals, settings, backups and reset still need the organizer PIN. The server rejects anything else from a racer code.
+Change it: `update private.admin set racer_code = 'new-code';`  Turn it off: `update private.admin set racer_code = null;`
+If you ever re-run `setup.sql`, run `racer-code.sql` again afterwards.
+
 ## Safety net
 - **Backups:** every save keeps the previous version (last 50). **Setup → Backups → Show backups → Restore** rolls back a mistake.
 - **Reset:** **Setup → Reset** clears results (keeps roster) or erases everything. Applies only to the mode you're in (live or test).
